@@ -1,0 +1,1021 @@
+\appendix{Фрагменты исходного кода программы}
+ClassController.js
+\begin{lstlisting}[language=C++]
+	const { Class } = require("../models/models")
+	
+	class ClassController {
+		
+		async create(req, res) {
+			try {
+				let {name, typeId} = req.body
+				const clas = await Class.create({name, typeId})
+				return res.json(clas)
+			} catch (error) {
+				console.error("Error creating class:", error);
+				return res.status(500).json({ message: "Internal server error" });
+			}
+		}
+		
+		async getAll(req, res) {
+			const clases = await Class.findAll()
+			return res.json(clases)
+		}
+	}
+	
+	module.exports = new ClassController()
+\end{lstlisting}
+
+itemController.js
+\begin{lstlisting}[language=C++]
+	const uuid = require('uuid')
+	const path = require('path')
+	const {Item, AmmoInfo, Equipment, Weapon, Containers, Artefacts, Grenades, StorageItem, User, Type, Class} = require('../models/models')
+	const ApiError = require('../error/ApiError')
+	const { Op } = require('sequelize')
+	
+	class ItemController {
+		
+		async create(req, res, next) {
+			try {
+				let {name, description, weight, level, typeId, classId, ammo_infos, artefacts, equipment, weapons, containers, grenade} = req.body
+				const {img} = req.files
+				let fileName = uuid.v4() + ".png"
+				img.mv(path.resolve(__dirname, '..', 'static', fileName))
+				
+				const item = await Item.create({name, description, weight, level, typeId, classId, img: fileName})
+				
+				if (ammo_infos) {
+					ammo_infos = JSON.parse(ammo_infos);
+					ammo_infos.forEach(async i => {
+						await AmmoInfo.create({
+							type_ammo: i.type_ammo,
+							breaking_throught: i.breaking_throught,
+							damage: i.damage,
+							itemId: item.id
+						});
+					});
+				}
+				
+				if (weapons) {
+					weapons = JSON.parse(weapons);
+					weapons.forEach(async i => {
+						await Weapon.create({
+							moa: i.moa, 
+							rate_of_fire: i.rate_of_fire, 
+							breaking_throught: i.breaking_throught, 
+							strength: i.strength, 
+							recoil: i.recoil,
+							handing: i.handing,
+							state_waivers: i.state_waivers,
+							nopollution: i.nopollution,
+							itemId: item.id
+						})
+					})
+				}
+				
+				return res.json(item)
+			} catch (e) {
+				next(ApiError.badRequest(e.message))
+			}
+		}
+		
+		async getAll(req, res) {
+			let {classId, typeId, limit, page} = req.query
+			page = page || 1
+			limit = limit || 15
+			let offset = page * limit - limit
+			let items;
+			if (!classId && !typeId) {
+				items = await Item.findAndCountAll({limit, offset})
+			}
+			if (classId && !typeId) {
+				items = await Item.findAndCountAll({where:{classId}, limit, offset})
+			}
+			if(!classId && typeId) {
+				items = await Item.findAndCountAll({where:{typeId}, limit, offset})
+			}
+			if (classId && typeId) {
+				items = await Item.findAndCountAll({where:{classId, typeId}, limit, offset})
+			}
+			return res.json(items)
+		}
+		
+		async getOne(req, res) {
+			const {id} = req.params
+			const item = await Item.findOne(
+			{
+				where: {id},
+				include: [{model: AmmoInfo, as: 'ammo_infos'}]
+			}
+			)
+			return res.json(item)
+		}
+		
+		async search(req, res) {
+			const { name } = req.params;
+			
+			if (!name) {
+				return res.status(400).json({ message: 'Название предмета не может быть пустым' });
+			}
+			
+			try {
+				const items = await Item.findAll({
+					where: {
+						name: {
+							[Op.like]: `%${name}%`
+						}
+					}
+				});
+				return res.json(items);
+			} catch (error) {
+				console.error('Ошибка при поиске предмета:', error);
+				return res.status(500).json({ message: 'Ошибка при поиске предмета' });
+			}
+		}
+		
+		async getStorageItems(req, res, next) {
+			const { server } = req.params
+			let { page, limit, classId, typeId } = req.query;
+			page = page || 1
+			limit = limit || 15
+			let offset = page * limit - limit
+			
+			const where = {};
+			if (classId) where.classId = classId;
+			if (typeId) where.typeId = typeId;
+			
+			try {
+				const items = await StorageItem.findAndCountAll({
+					where: { server },
+					include: [
+					{
+						model: Item,
+						attributes: ['id', 'name', 'img']
+					},
+					{
+						model: User,
+						attributes: ['id', 'email', 'ru1', 'ru2', 'ru3', 'eu1', 'us1']
+					}
+					],
+					limit,
+					offset,
+					order: [
+					['itemId', 'ASC'],
+					['userId', 'ASC']
+					]
+				});
+				
+				return res.json(items);
+			} catch (error) {
+				console.error("Ошибка при получении предметов из хранилища:", error); // Логируем ошибку
+				next(ApiError.internal(error.message));
+			}
+		}
+		
+		async getUserItems(req, res, next) {
+			const { userId } = req.query;
+			
+			try {
+				const items = await StorageItem.findAll({
+					where: { userId },
+					include: [
+					{
+						model: Item,
+						attributes: ['id', 'name', 'img']
+					},
+					{
+						model: User,
+						attributes: ['id', 'email']
+					}
+					],
+					order: [['id', 'ASC']]
+				});
+				
+				return res.json(items);
+			} catch (error) {
+				console.error("Ошибка при получении предметов пользователя:", error);
+				next(ApiError.internal(error.message));
+			}
+		}
+		
+		async addItemToStorage(req, res, next) {
+			const { userId, itemId, price, quantity, classId, typeId, server } = req.body;
+			try {
+				// Создаем запись в StorageItem
+				const storageItem = await StorageItem.create({
+					userId,
+					itemId,
+					price,
+					quantity,
+					classId,
+					typeId,
+					server
+				});
+				
+				return res.json(storageItem);
+			} catch (error) {
+				return next(error);
+			}
+		}
+		
+		async deleteItem(req, res, next) {
+			try {
+				const { id } = req.params;
+				const item = await StorageItem.findOne({ where: { id } });
+				
+				if (!item) {
+					return next(ApiError.badRequest('Предмет не найден'));
+				}
+				
+				// Удаление предмета из базы данных
+				await item.destroy();
+				
+				return res.json({ message: 'Предмет успешно удален' });
+			} catch (error) {
+				console.error('Ошибка при удалении предмета:', error);
+				next(ApiError.internal('Ошибка при удалении предмета'));
+			}
+		}
+		
+		async getAmmoInfosByItemId(req, res, next) {
+			const { itemId } = req.params;
+			try {
+				const ammoInfos = await AmmoInfo.findAll({ where: { itemId } });
+				return res.json(ammoInfos);
+			} catch (error) {
+				console.error('Error fetching ammo_infos:', error);
+				return res.status(500).json({ error: 'Internal server error' });
+			}
+		}
+	}
+	
+	module.exports = new ItemController()
+\end{lstlisting}
+	
+typeController.js
+\begin{lstlisting}[language=C++]
+	const {Type} = require('../models/models');
+	const ApiError = require('../error/ApiError');
+	
+	class TypeController {
+		
+		async create(req, res) {
+			const {name} = req.body
+			const type = await Type.create({name})
+			return res.json(type)
+		}
+		
+		async getAll(req, res) {
+			const types = await Type.findAll()
+			return res.json(types)
+		}
+	}
+	
+	module.exports = new TypeController()
+\end{lstlisting}
+
+userController.js
+\begin{lstlisting}[language=C++]
+	const ApiError = require('../error/ApiError');
+	const bcrypt = require('bcrypt')
+	const jwt = require('jsonwebtoken')
+	const {User, Storage, StorageItem, Item} = require('../models/models')
+	
+	const generateJwt = (id, email, role, ru1, ru2, ru3, eu1, us1) => {
+		return jwt.sign(
+		{id: id, email, role, ru1, ru2, ru3, eu1, us1}, 
+		process.env.SECRET_KEY,
+		{expiresIn: '24h'}
+		)
+	}
+	
+	class UserController {
+		
+		async registration(req, res, next) {
+			const {email, password, role} = req.body
+			if (!email || !password) {
+				return next(ApiError.badRequest('Некорректный email или password'))
+			}
+			const candidate = await User.findOne({where: {email}})
+			if (candidate) {
+				return next(ApiError.badRequest('Пользователь с таким email уже существует'))
+			}
+			const hashPassword = await bcrypt.hash(password, 5)
+			const user = await User.create({email, role, password: hashPassword})
+			const basket = await Storage.create({userId: user.id})
+			const token = generateJwt(user.id, user.email, user.role, user.ru1, user.ru2, user.ru3, user.eu1, user.us1)
+			return res.json({token})
+		}
+		
+		async login(req, res, next) {
+			const {email, password} = req.body
+			const user = await User.findOne({where: {email}})
+			if (!user) {
+				return next(ApiError.internal('Пользователь с таким именем не найден'))
+			}
+			let comparePassword = bcrypt.compareSync(password, user.password)
+			if (!comparePassword) {
+				return next(ApiError.internal('Указан неверный пароль'))
+			}
+			const token = generateJwt(user.id, user.email, user.role, user.ru1, user.ru2, user.ru3, user.eu1, user.us1)
+			return res.json({token})
+		}
+		
+		async check(req, res, next) {
+			const token = generateJwt(req.user.id, req.user.email, req.user.role, req.user.ru1, req.user.ru2, req.user.ru3, req.user.eu1, req.user.us1)
+			return res.json({token})
+		}
+		
+		async changePassword(req, res, next) {
+			const { currentPassword, newPassword } = req.body;
+			const userId = req.user.id;
+			
+			const user = await User.findOne({ where: { id: userId } });
+			if (!user) {
+				return next(ApiError.badRequest('Пользователь не найден'));
+			}
+			
+			const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
+			if (!isPasswordValid) {
+				return next(ApiError.badRequest('Неверный текущий пароль'));
+			}
+			
+			const hashPassword = await bcrypt.hash(newPassword, 5);
+			user.password = hashPassword;
+			await user.save();
+			
+			return res.json({ message: 'Пароль успешно изменен' });
+		}
+		
+		async createStorage(req, res, next) {
+			const { userId } = req.body;
+			const storage = await Storage.create({ userId });
+			return res.json(storage);
+		}
+		
+		async addItemToStorage(req, res, next) {
+			const { storageId, itemId, price, quantity } = req.body;
+			const storageItem = await StorageItem.create({ storageId, itemId, price, quantity });
+			return res.json(storageItem);
+		}
+		
+		async getItemsFromStorage(req, res, next) {
+			const { storageId, classId, typeId, limit, page } = req.query;
+			const items = await StorageItem.findAll({
+				where: { storageId },
+				include: [
+				{
+					model: Item,
+					where: {
+						...(classId && { classId }),
+						...(typeId && { typeId })
+					}
+				}
+				],
+				limit,
+				offset: (page - 1) * limit
+			});
+			return res.json(items);
+		}
+		
+		async updateNicknames(req, res, next) {
+			const { userId, nicknames } = req.body;
+			
+			// Логирование входящих данных
+			console.log("updateNicknames - userId:", userId);
+			console.log("updateNicknames - nicknames:", nicknames);
+			
+			if (!userId) {
+				return next(ApiError.badRequest('User ID is required'));
+			}
+			
+			try {
+				const user = await User.findByPk(userId);
+				
+				if (!user) {
+					return next(ApiError.notFound('User not found'));
+				}
+				
+				user.ru3 = nicknames.ru3 || user.ru3;
+				user.ru2 = nicknames.ru2 || user.ru2;
+				user.ru1 = nicknames.ru1 || user.ru1;
+				user.eu1 = nicknames.eu1 || user.eu1;
+				user.us1 = nicknames.us1 || user.us1;
+				
+				await user.save();
+				
+				return res.json({ message: 'Nicknames updated successfully' });
+			} catch (error) {
+				console.error('Error updating nicknames:', error);
+				return next(ApiError.internal(error.message));
+			}
+		}
+	}
+	
+	module.exports = new UserController()
+\end{lstlisting}
+
+Main.js
+\begin{lstlisting}[language=C++]
+	import React, { useState } from "react";
+	import { Button, Container } from "react-bootstrap";
+	import ServerSelectModal from "../components/ServerSelectModal";
+	
+	const Main = () => {
+		const [modalShow, setModalShow] = useState(false)
+		return (
+		<div className="home-background">
+		<Container className="text-center text-white d-flex flex-column justify-content-center align-items-center vh-100">
+		<h1>SO MARKET</h1>
+		<h2>УДОБНАЯ ПЛОЩАДКА ДЛЯ ТОРГОВЛИ</h2>
+		<p>Для начала выберите свой сервер</p>
+		<Button variant="outline-light" className="mt-3" onClick={() => setModalShow(true)}>Выбрать сервер</Button>
+		
+		<ServerSelectModal show={modalShow} handleClose={() => setModalShow(false)} />
+		</Container>
+		</div>
+		);
+	};
+	
+	export default Main;
+\end{lstlisting}
+
+ProfilPage.js
+\begin{lstlisting}[language=C++]
+	import React, { useContext, useState, useEffect } from 'react';
+	import { Container, Row, Col, Button, Form, Image } from 'react-bootstrap';
+	import './ProfilPage.css';
+	import ChangePasswordModal from "../components/modals/ChangePasswordModal";
+	import { Context } from '../index';
+	import { check, updateNickname } from '../http/userAPI';
+	import { deleteUserItem, fetchUserItems } from '../http/ItemAPI';
+	import { useNavigate } from 'react-router-dom';
+	import { DEVICE_ROUTE } from '../utils/consts';
+	
+	const Profile = () => {
+		const { user } = useContext(Context);
+		const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
+		const [nicknames, setNicknames] = useState({
+			ru3: '',
+			ru2: '',
+			ru1: '',
+			eu1: '',
+			us1: ''
+		});
+		const [items, setItems] = useState([]);
+		const [userData, setUserData] = useState({ id: 0, email: '', role: '' });
+		const navigate = useNavigate();
+		
+		useEffect(() => {
+			const fetchData = async () => {
+				try {
+					const user = await check();
+					
+					if (user) {
+						const { userId, email, role } = user;
+						setUserData({ id: userId, email, role });
+						
+						console.log("Fetched user data:", user);
+						
+						// Получение предметов пользователя после установки userData
+						const userItems = await fetchUserItems(userId);
+						setItems(userItems);
+						
+						setNicknames({
+							ru3: user.ru3 || '',
+							ru2: user.ru2 || '',
+							ru1: user.ru1 || '',
+							eu1: user.eu1 || '',
+							us1: user.us1 || ''
+						});
+					} else {
+						console.error('Ошибка аутентификации пользователя');
+					}
+				} catch (error) {
+					console.error('Ошибка при загрузке данных пользователя:', error);
+				}
+			};
+			
+			fetchData();
+		}, []);
+		
+		const handleOpenChangePasswordModal = () => setShowChangePasswordModal(true);
+		const handleCloseChangePasswordModal = () => setShowChangePasswordModal(false);
+		
+		const handleInputChange = (event) => {
+			const { id, value } = event.target;
+			setNicknames((prevState) => ({
+				...prevState,
+				[id]: value
+			}));
+		};
+		
+		const handleSaveNicknames = async () => {
+			try {
+				await updateNickname(userData.id, nicknames);
+			} catch (error) {
+				console.error('Ошибка при сохранении никнеймов:', error);
+			}
+		};
+		
+		const handleDeleteItem = async (itemId) => {
+			try {
+				await deleteUserItem(itemId);
+				setItems(items.filter(item => item.id !== itemId));
+			} catch (error) {
+				console.error('Ошибка при удалении предмета:', error);
+			}
+		};
+		
+		return (
+		<>
+		<div className="profile-background"></div>
+		<Container className="profile-container">
+		<h1 className="profile-title">Профиль пользователя</h1>
+		<Row className="profile-row">
+		<Col md={6}>
+		<h4>Игровой никнейм:</h4>
+		<Form>
+		{Object.keys(nicknames).map((key) => (
+			<Form.Group className="mb-3" controlId={key} key={key}>
+			<Form.Label>{key.toUpperCase().replace('_', '-')}:</Form.Label>
+			<Form.Control 
+			type="text" 
+			placeholder="Никнейм..." 
+			value={nicknames[key]} 
+			onChange={handleInputChange} 
+			/>
+			</Form.Group>
+			))}
+		<Button variant="primary" onClick={handleSaveNicknames}>Сохранить изменения</Button>
+		</Form>
+		</Col>
+		<Col md={6}>
+		<h4>Ваш email: {userData.email}</h4>
+		<Button variant="dark" className="mb-3" onClick={handleOpenChangePasswordModal}>Изменить пароль</Button>
+		<h4>Роль: {userData.role}</h4>
+		</Col>
+		</Row>
+		<hr />
+		<Row>
+		<h4>Выставленные товары:</h4>
+		{items.map(item => (
+			<React.Fragment key={item.id}>
+			<Row className="h-100" style={{ marginRight: 0, marginLeft: 0 }}>
+			<Col md={3} className="h-100 d-flex align-items-center justify-content-center" style={{ paddingRight: 0, paddingLeft: 0 }}>
+			<Image
+			src={process.env.REACT_APP_API_URL + item.item.img}
+			fluid
+			style={{ maxHeight: '100%', width: 'auto' }}
+			onClick={() => navigate(DEVICE_ROUTE + '/' + item.id)}
+			/>
+			</Col>
+			<Col md={6} className="d-flex align-items-center">
+			<div>
+			<div>{"Название: " + item.item.name}</div>
+			<div>{"Цена за единицу: " + item.price}</div>
+			<div>{"Количество: " + item.quantity}</div>
+			<div>{"Сервер: " + item.server}</div>
+			</div>
+			</Col>
+			<Col md={3} className="d-flex align-items-center justify-content-center">
+			<Button variant="danger" onClick={() => handleDeleteItem(item.id)}>Удалить</Button>
+			</Col>
+			</Row>
+			<hr style={{ margin: '10px 0' }} />
+			</React.Fragment>
+			))}
+		</Row>
+		<ChangePasswordModal
+		show={showChangePasswordModal}
+		handleClose={handleCloseChangePasswordModal}
+		/>
+		</Container>
+		</>
+		);
+	};
+	
+	export default Profile;
+\end{lstlisting}
+
+Shop.js
+\begin{lstlisting}[language=C++]
+	import React, { useContext, useEffect, useState } from "react";
+	import { Button, Col, Container, Form, ListGroup, Row } from "react-bootstrap";
+	import TypeBar from "../components/TypeBar";
+	import ClassBar from "../components/ClassBar";
+	import ItemList from "../components/ItemList";
+	import { observer } from "mobx-react-lite";
+	import { Context } from "../index";
+	import { fetchClasses, fetchItem, fetchStorageItems, fetchTypes, searchItemByName } from "../http/ItemAPI";
+	import Pages from "../components/Pages";
+	import '../App.css';
+	import SellItemModal from "../components/modals/SellItemModal";
+	import { useNavigate, useParams } from "react-router-dom";
+	
+	const Shop = observer(() => {
+		const {user, device} = useContext(Context);
+		const navigate = useNavigate();
+		const { serverId } = useParams();
+		const [showModal, setShowModal] = useState(false);
+		
+		const handleSellItem = async () => {
+			setShowModal(false);
+		};
+		
+		useEffect(() => {
+			const fetchData = async () => {
+				try {
+					const typesData = await fetchTypes();
+					device.setTypes(typesData);
+					
+					const classesData = await fetchClasses();
+					device.setClasses(classesData);
+					
+					const storageItemsData = await fetchStorageItems(serverId, device.selectedType.id, device.selectedClass.id, device.page, 5);
+					device.setItems(storageItemsData.rows);
+					device.setTotalCount(storageItemsData.count);
+				} catch (error) {
+					console.error('Ошибка при загрузке данных:', error);
+				}
+			};
+			
+			fetchData();
+			
+			const intervalId = setInterval(fetchData, 5000);
+			
+			return () => clearInterval(intervalId);
+		}, [device.selectedType, device.selectedClass, device.page, serverId]);
+		
+		return (
+		<Container>
+		<Row className="mt-2">
+		<Col md={3}>
+		<TypeBar />
+		</Col>
+		<Col md={9}>
+		<ClassBar />
+		<ItemList serverId={serverId} />
+		<Pages />
+		</Col>
+		</Row>
+		<Button variant="primary" onClick={() => setShowModal(true)} style={{ position: 'fixed', bottom: '20px', right: '20px' }}>
+		<i className="fas fa-plus"></i> Выставить на продажу
+		</Button>
+		<SellItemModal show={showModal} handleClose={() => setShowModal(false)} handleSell={handleSellItem} serverId={serverId} />
+		</Container>
+		);
+	});
+	
+	export default Shop;
+\end{lstlisting}
+
+Auth.js
+\begin{lstlisting}[language=C++]
+	import React, { useContext, useState } from "react";
+	import { Button, Card, Col, Container, Row } from "react-bootstrap";
+	import { Form } from "react-bootstrap";
+	import { NavLink, useLocation, useNavigate } from "react-router-dom";
+	import { LOGIN_ROUTE, MAIN_ROUTE, REGISTRATION_ROUTE } from "../utils/consts";
+	import { login, registration } from "../http/userAPI";
+	import { observer } from "mobx-react-lite";
+	import { Context } from "../index";
+	
+	const Auth = observer(() => {
+		const {user} = useContext(Context)
+		const location = useLocation()
+		const history = useNavigate()
+		const isLogin = location.pathname === LOGIN_ROUTE
+		const [email, setEmail] = useState('')
+		const [password, setPassword] = useState('')
+		
+		const click = async () => {
+			try {
+				let data;
+				if (isLogin) {
+					data = await login(email, password)
+				} else {
+					data = await registration(email, password)
+				}
+				user.setUser(user)
+				user.setIsAuth(true)
+				history(MAIN_ROUTE)
+			} catch(e) {
+				alert(e.response.data.message)
+			}
+		}
+		
+		return (
+		<Container 
+		className="d-flex justify-content-center align-items-center"
+		style={{height: window.innerHeight - 54}}
+		>
+		<Card style={{width: 600}} className="p-5">
+		<h2 className="m-auto">{isLogin ? "Авторизация" : "Регистрация"}</h2>
+		<Form className="d-flex flex-column">
+		<Form.Control
+		className="mt-4"
+		placeholder="Введите ваш email..."
+		value={email}
+		onChange={e => setEmail(e.target.value)}
+		/>
+		<Form.Control
+		className="mt-3"
+		placeholder="Введите ваш пароль..."
+		value={password}
+		onChange={e => setPassword(e.target.value)}
+		type="password"
+		/>
+		<Row className="d-flex justify-content-between align-items-center mt-3">
+		{isLogin ? 
+			<Col className="pl-0">
+			Нет аккаунта? <NavLink to={REGISTRATION_ROUTE}>Зарегистрируйтесь!</NavLink>
+			</Col>
+			:
+			<Col className="pl-0">
+			Есть аккаунт? <NavLink to={LOGIN_ROUTE}>Войдите!</NavLink>
+			</Col>
+		}
+		{isLogin ? 
+			<Col className="d-flex justify-content-end pr-0">
+			<Button variant="outline-success" onClick={click}>Войти</Button>
+			</Col>
+			:
+			<Col className="d-flex justify-content-end pr-0">
+			<Button variant="outline-success" onClick={click}>Зарегистрироваться</Button>
+			</Col>
+		}
+		</Row>
+		</Form>
+		</Card>
+		</Container>
+		);
+	});
+	
+	export default Auth;
+\end{lstlisting}
+
+ItemItem.js
+\begin{lstlisting}[language=C++]
+	import React, { useState } from 'react';
+	import { Card, Col, Image, Button, Row, Form } from 'react-bootstrap';
+	import { useNavigate } from 'react-router-dom';
+	import { DEVICE_ROUTE } from '../utils/consts';
+	
+	const ItemItem = ({ device, serverId }) => {
+		const navigate = useNavigate();
+		const [isBuying, setIsBuying] = useState(false);
+		const formattedServerId = serverId.serverId.replace('-', '');
+		
+		const userNickname = device.user[formattedServerId];
+		
+		const handleBuyClick = () => {
+			setIsBuying(true);
+		};
+		
+		const handleCancelClick = () => {
+			setIsBuying(false);
+		};
+		
+		return (
+		<Col md={12}>
+		<Card id='cardItem' style={{ cursor: 'pointer', marginBottom: '10px', padding: '10px', fontSize: '14px' }} border="light">
+		{!isBuying ? (
+			<>
+			<Row className="h-100" style={{ marginRight: 0, marginLeft: 0 }}>
+			<Col md={3} className="h-100 d-flex align-items-center justify-content-center" style={{ paddingRight: 0, paddingLeft: 0 }}>
+			<Image
+			src={process.env.REACT_APP_API_URL + device.item.img}
+			fluid
+			style={{ maxHeight: '100%', width: 'auto' }}
+			onClick={() => navigate(DEVICE_ROUTE + '/' + device.item.id)}
+			/>
+			</Col>
+			<Col md={6} className="d-flex align-items-center">
+			<div>
+			<div>{"Название: " + device.item.name}</div>
+			<div>{"Цена за единицу: " + device.price}</div>
+			<div>{"Количество: " + device.quantity}</div>
+			</div>
+			</Col>
+			<Col md={3} className="d-flex align-items-center justify-content-center">
+			<Button variant="primary" onClick={handleBuyClick}>Купить</Button>
+			</Col>
+			</Row>
+			<hr style={{ margin: '10px 0' }} />
+			<Row className="d-flex justify-content-center">
+			<div>{"  " + userNickname}</div>
+			</Row>
+			</>
+			) : (
+			<>
+			<Row className="h-100" style={{ marginRight: 0, marginLeft: 0 }}>
+			<Col md={12}>
+			<div style={{ marginBottom: '5px' }}>Скопируйте сообщение ниже:</div>
+			<Form.Control
+			as="textarea"
+			rows={3}
+			defaultValue={`@${userNickname} Привет. Хочу купить: "${device.item.name}" за ${device.price} рублей (somarket)`}
+			style={{ fontSize: '14px' }}
+			/>
+			</Col>
+			</Row>
+			<hr style={{ margin: '10px 0' }} />
+			<Row className="d-flex justify-content-center">
+			<Button variant="outline-danger" size="sm" onClick={handleCancelClick} style={{ width: 'auto', margin: '5 auto' }}>Закрыть</Button>
+			</Row>
+			</>
+			)}
+		</Card>
+		</Col>
+		);
+	};
+	
+	export default ItemItem;
+\end{lstlisting}
+
+itemAPI.js
+\begin{lstlisting}[language=C++]
+	import { $authHost, $host } from "./index";
+	
+	export const createType = async (type) => {
+		const {data} = await $authHost.post('api/type', type);
+		return data;
+	};
+	
+	export const fetchTypes = async () => {
+		const {data} = await $host.get('api/type');
+		return data;
+	};
+	
+	export const createClass = async (classe) => {
+		const {data} = await $authHost.post('api/class', classe);
+		return data;
+	};
+	
+	export const fetchClasses = async () => {
+		const {data} = await $host.get('api/class');
+		return data;
+	};
+	
+	export const createItems = async (item) => {
+		const {data} = await $authHost.post('api/item', item);
+		return data;
+	};
+	
+	export const fetchItem = async (typeId, classId, page, limit = 5) => {
+		const {data} = await $host.get('api/item', {
+			params: { typeId, classId, page, limit }
+		});
+		return data;
+	};
+	
+	export const fetchOnItem = async (id) => {
+		const {data} = await $host.get('api/item/item/' + id);
+		return data;
+	};
+	
+	export const searchItemByName = async (name) => {
+		try {
+			const {data} = await $authHost.get(`api/item/search/${name}`);
+			return data;
+		} catch (error) {
+			console.error('Ошибка при поиске предмета:', error);
+			throw error;
+		}
+	};
+	
+	export const addItemToStorage = async ({ userId, itemId, price, quantity, typeId, classId, server }) => {
+		try {
+			const { data } = await $authHost.post('api/item/storage/add', {
+				userId,
+				itemId,
+				price,
+				quantity,
+				typeId,
+				classId,
+				server
+			});
+			return data;
+		} catch (error) {
+			console.error('Ошибка при добавлении предмета в корзину:', error);
+			throw error;
+		}
+	};
+	
+	export const fetchStorageItems = async (serverId, typeId, classId, page, limit = 10) => {
+		try {
+			const { data } = await $host.get(`api/item/storage/items/${serverId}`, {
+				params: { typeId, classId, page, limit }
+			});
+			return data;
+		} catch (error) {
+			console.error('Ошибка при загрузке предметов из хранилища:', error);
+			throw error;
+		}
+	};
+	
+	export const fetchUserItems = async (userId) => {
+		try {
+			const { data } = await $host.get('api/item/user/items', {
+				params: { userId }
+			});
+			return data;
+		} catch (error) {
+			console.error('Ошибка при загрузке предметов пользователя:', error);
+			throw error;
+		}
+	};
+	
+	export const deleteUserItem = async (id) => {
+		const { data } = await $authHost.delete('api/item/' + id);
+		return data;
+	};
+	
+	export const fetchAmmoInfos = async (itemId) => {
+		try {
+			const { data } = await $host.get(`api/ammo_infos/${itemId}`);
+			return data;
+		} catch (error) {
+			console.error('Error fetching ammo_infos:', error);
+			throw error;
+		}
+	};
+\end{lstlisting}
+
+userAPI.js
+\begin{lstlisting}[language=C++]
+	import { $authHost, $host } from "./index";
+	import { jwtDecode } from "jwt-decode";
+	
+	export const registration = async (email, password) => {
+		const {data} = await $host.post('api/user/registration', {email, password, role: 'ADMIN'});
+		localStorage.setItem('token', data.token);
+		return jwtDecode(data.token);
+	};
+	
+	export const login = async (email, password) => {
+		const {data} = await $host.post('api/user/login', {email, password});
+		localStorage.setItem('token', data.token);
+		return jwtDecode(data.token);
+	};
+	
+	export const check = async () => {
+		try {
+			const token = localStorage.getItem('token');
+			
+			if (!token) {
+				throw new Error('Token is not available');
+			}
+			
+			const decodedToken = jwtDecode(token);
+			const currentTime = Date.now() / 1000;
+			
+			if (decodedToken.exp < currentTime) {
+				throw new Error('Token has expired');
+			}
+			
+			const { data } = await $authHost.get('api/user/auth');
+			
+			const userData = {
+				token: data.token,
+				userId: decodedToken.id,
+				email: decodedToken.email,
+				role: decodedToken.role,
+				ru1: decodedToken.ru1,
+				ru2: decodedToken.ru2,
+				ru3: decodedToken.ru3,
+				eu1: decodedToken.eu1,
+				us1: decodedToken.us1,
+			};
+			
+			localStorage.setItem('token', userData.token);
+			return userData;
+		} catch (error) {
+			console.error('Authentication check failed:', error);
+			return null;
+		}
+	};
+	
+	export const changePassword = async (currentPassword, newPassword) => {
+		const {data} = await $authHost.post('/api/user/change-password', { currentPassword, newPassword });
+		return data;
+	};
+	
+	export const updateNickname = async (userId, nicknames) => {
+		try {
+			await $authHost.put('api/user/nicknames', { userId, nicknames });
+		} catch (error) {
+			console.error('Ошибка при обновлении никнейма:', error);
+			throw error;
+		}
+	};
+\end{lstlisting}
+
+\ifВКР{
+\newpage
+\addcontentsline{toc}{section}{На отдельных листах (CD-RW в прикрепленном конверте)}
+\begin{center}
+\textbf{Место для диска}
+\end{center}
+}\fi
